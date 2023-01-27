@@ -1,28 +1,28 @@
 From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
 From: wangxyper <wangxyper@163.com>
-Date: Fri, 27 Jan 2023 19:15:58 +0800
+Date: Fri, 27 Jan 2023 19:30:39 +0800
 Subject: [PATCH] Build setting changes
 
 
 diff --git a/build.gradle.kts b/build.gradle.kts
-index f3287cea49ee7352a1065dc65927ab9922d0a9c4..92c03ccb87750754312ec69d79b050852bf70fe0 100644
+index 020927dfe9624453311d1d171a10f44344ec8710..184022fec0cc1fd8505410783133fa735e847605 100644
 --- a/build.gradle.kts
 +++ b/build.gradle.kts
-@@ -9,7 +9,7 @@ plugins {
+@@ -7,7 +7,7 @@ plugins {
+ }
+ 
  dependencies {
-     // Gale start - project setup
-     // Depend on own API
--    implementation(project(":gale-api"))
-+    implementation(project(":mikuserver-api")) // MikuServer
-     // Depend on Paper MojangAPI
+-    implementation(project(":purpur-api")) // Purpur
++    implementation(project(":mikuserver-api")) // Purpur //MikuServer
+     // Pufferfish start
      implementation("io.papermc.paper:paper-mojangapi:1.19.3-R0.1-SNAPSHOT") {
          exclude("io.papermc.paper", "paper-api")
-@@ -78,7 +78,7 @@ tasks.jar {
+@@ -83,7 +83,7 @@ tasks.jar {
          attributes(
              "Main-Class" to "org.bukkit.craftbukkit.Main",
              "Implementation-Title" to "CraftBukkit",
--            "Implementation-Version" to "git-Gale-$implementationVersion", // Gale - branding changes
-+            "Implementation-Version" to "git-MikuServer-$implementationVersion", // Gale - branding changes //MikuServer
+-            "Implementation-Version" to "git-Purpur-$implementationVersion", // Purpur
++            "Implementation-Version" to "git-MikuServer-$implementationVersion", // Purpur //MikuServer
              "Implementation-Vendor" to date, // Paper
              "Specification-Title" to "Bukkit",
              "Specification-Version" to project.version,
