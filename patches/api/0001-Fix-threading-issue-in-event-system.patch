@@ -1,0 +1,59 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wangxyper <wangxyper@163.com>
+Date: Sat, 28 Jan 2023 13:05:13 +0800
+Subject: [PATCH] Fix threading issue in event system
+
+
+diff --git a/src/main/java/org/bukkit/Server.java b/src/main/java/org/bukkit/Server.java
+index e0f69edf603c2ec99bc92b16b18912272cc41bd9..64a265ddd301080a84529e24f4bf7c82cda12ea3 100644
+--- a/src/main/java/org/bukkit/Server.java
++++ b/src/main/java/org/bukkit/Server.java
+@@ -113,6 +113,8 @@ public interface Server extends PluginMessageRecipient, net.kyori.adventure.audi
+     @NotNull
+     public String getBukkitVersion();
+ 
++    public boolean isCurrentThreadWorker();
++
+     // Paper start - expose game version
+     /**
+      * Gets the version of game this server implements
+diff --git a/src/main/java/org/bukkit/plugin/SimplePluginManager.java b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+index 75be5cdfeb30732975bbc38dc7aab52a0cdead9c..8f6a90c087a9b12243fd5620d9badb95c57ea21d 100644
+--- a/src/main/java/org/bukkit/plugin/SimplePluginManager.java
++++ b/src/main/java/org/bukkit/plugin/SimplePluginManager.java
+@@ -654,6 +654,8 @@ public final class SimplePluginManager implements PluginManager {
+     }
+     private void fireEvent(Event event) { callEvent(event); } // Paper - support old method incase plugin uses reflection
+ 
++    private final Object eventLock = new Object();
++
+     /**
+      * Calls an event with the given details.
+      *
+@@ -668,6 +670,17 @@ public final class SimplePluginManager implements PluginManager {
+             throw new IllegalStateException(event.getEventName() + " may only be triggered synchronously.");
+         }
+ 
++        if (server.isCurrentThreadWorker()){
++            synchronized (this.eventLock){
++                this.callEventInternal(event);
++                return;
++            }
++        }
++
++        this.callEventInternal(event);
++    }
++
++    private void callEventInternal(Event event){
+         HandlerList handlers = event.getHandlers();
+         RegisteredListener[] listeners = handlers.getRegisteredListeners();
+ 
+@@ -689,7 +702,7 @@ public final class SimplePluginManager implements PluginManager {
+                             plugin.getDescription().getAuthors(),
+                             plugin.getDescription().getFullName(),
+                             ex.getMessage()
+-                            ));
++                    ));
+                 }
+             } catch (Throwable ex) {
+                 gg.pufferfish.pufferfish.sentry.SentryContext.setEventContext(event, registration); // Pufferfish

@@ -1,0 +1,29 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wangxyper <wangxyper@163.com>
+Date: Sat, 28 Jan 2023 13:05:12 +0800
+Subject: [PATCH] Fix threading issue in event system
+
+
+diff --git a/src/main/java/org/bukkit/craftbukkit/CraftServer.java b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+index 4a8aafd341fdad4b5ae326c4759b3381f5061fb5..dfdf0180bb450a2b90f1cca53d7277803cb6a77f 100644
+--- a/src/main/java/org/bukkit/craftbukkit/CraftServer.java
++++ b/src/main/java/org/bukkit/craftbukkit/CraftServer.java
+@@ -1,5 +1,6 @@
+ package org.bukkit.craftbukkit;
+ 
++import co.mikumc.mikuserver.utils.AnotherTickThread;
+ import com.google.common.base.Charsets;
+ import com.google.common.base.Function;
+ import com.google.common.base.Preconditions;
+@@ -430,6 +431,11 @@ public final class CraftServer implements Server {
+         }
+     }
+ 
++    @Override
++    public boolean isCurrentThreadWorker(){
++        return Thread.currentThread() instanceof AnotherTickThread;
++    }
++
+     private void saveCommandsConfig() {
+         try {
+             this.commandsConfiguration.save(this.getCommandsConfigFile());
