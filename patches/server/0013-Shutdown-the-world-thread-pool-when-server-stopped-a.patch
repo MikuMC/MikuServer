@@ -1,0 +1,50 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wangxyper <wangxyper@163.com>
+Date: Sun, 29 Jan 2023 14:07:47 +0800
+Subject: [PATCH] Shutdown the world thread pool when server stopped and using
+ Util.shutdownExecutor
+
+
+diff --git a/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java b/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java
+index d84ae0bb0c51a5f09a2497c67548db9035150ef3..85167e4f7b9f20c6cc0dd826230e9f2c33bc4237 100644
+--- a/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java
++++ b/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java
+@@ -2,6 +2,7 @@ package co.mikumc.mikuserver;
+ 
+ import co.mikumc.mikuserver.concurrent.CallbackExecutor;
+ import co.mikumc.mikuserver.utils.AnotherTickThread;
++import net.minecraft.Util;
+ import net.minecraft.server.MinecraftServer;
+ import net.minecraft.server.level.ServerLevel;
+ 
+@@ -86,7 +87,8 @@ public class PublicConstantsAndHooks {
+             if (asyncExecutor.isSubmittingStarted()){
+                 asyncExecutor.stopSubmitting();
+             }
+-            asyncExecutor.shutdownNow();
++            Util.shutdownExecutor(asyncExecutor);
++            Util.shutdownExecutor(worldExecutor);
+         }));
+     }
+ }
+diff --git a/src/main/java/net/minecraft/Util.java b/src/main/java/net/minecraft/Util.java
+index 5ef58831a857fd8aa4ac30147762dc17d773a53e..f0fd5a72abfaf24dee0fdfa0d7a6a26a46f5e510 100644
+--- a/src/main/java/net/minecraft/Util.java
++++ b/src/main/java/net/minecraft/Util.java
+@@ -223,7 +223,7 @@ public class Util {
+         shutdownExecutor(IO_POOL);
+     }
+ 
+-    private static void shutdownExecutor(ExecutorService service) {
++    public static void shutdownExecutor(ExecutorService service) {
+         service.shutdown();
+ 
+         boolean bl;
+@@ -236,7 +236,6 @@ public class Util {
+         if (!bl) {
+             service.shutdownNow();
+         }
+-
+     }
+ 
+     private static ExecutorService makeIoExecutor() {

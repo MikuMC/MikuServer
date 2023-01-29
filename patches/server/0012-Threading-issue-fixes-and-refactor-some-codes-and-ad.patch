@@ -1,0 +1,327 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: wangxyper <wangxyper@163.com>
+Date: Sun, 29 Jan 2023 14:04:40 +0800
+Subject: [PATCH] Threading issue fixes and refactor some codes and add
+ parallel world ticking
+
+
+diff --git a/src/main/java/co/mikumc/mikuserver/PublicConstants.java b/src/main/java/co/mikumc/mikuserver/PublicConstants.java
+deleted file mode 100644
+index 3f2e2e2be1d53b9257f99fb19a50491efc629925..0000000000000000000000000000000000000000
+--- a/src/main/java/co/mikumc/mikuserver/PublicConstants.java
++++ /dev/null
+@@ -1,29 +0,0 @@
+-package co.mikumc.mikuserver;
+-
+-import co.mikumc.mikuserver.concurrent.CallbackExecutor;
+-import co.mikumc.mikuserver.utils.AnotherTickThread;
+-
+-import java.util.concurrent.LinkedBlockingQueue;
+-import java.util.concurrent.TimeUnit;
+-import java.util.concurrent.atomic.AtomicInteger;
+-
+-public class PublicConstants {
+-    private static final AtomicInteger asyncWorkerThreadIdCounter = new AtomicInteger();
+-    public static final CallbackExecutor asyncExecutor = new CallbackExecutor(
+-            Runtime.getRuntime().availableProcessors(),
+-            Runtime.getRuntime().availableProcessors(),
+-            50,
+-            TimeUnit.MILLISECONDS,
+-            new LinkedBlockingQueue<>(),
+-            task -> new AnotherTickThread(task,"MikuServer-Async-Worker # "+ asyncWorkerThreadIdCounter.getAndIncrement())
+-    );
+-
+-    static {
+-        Runtime.getRuntime().addShutdownHook(new Thread(()->{
+-            if (asyncExecutor.isSubmittingStarted()){
+-                asyncExecutor.stopSubmitting();
+-            }
+-            asyncExecutor.shutdownNow();
+-        }));
+-    }
+-}
+diff --git a/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java b/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java
+new file mode 100644
+index 0000000000000000000000000000000000000000..d84ae0bb0c51a5f09a2497c67548db9035150ef3
+--- /dev/null
++++ b/src/main/java/co/mikumc/mikuserver/PublicConstantsAndHooks.java
+@@ -0,0 +1,92 @@
++package co.mikumc.mikuserver;
++
++import co.mikumc.mikuserver.concurrent.CallbackExecutor;
++import co.mikumc.mikuserver.utils.AnotherTickThread;
++import net.minecraft.server.MinecraftServer;
++import net.minecraft.server.level.ServerLevel;
++
++import java.util.concurrent.LinkedBlockingQueue;
++import java.util.concurrent.ThreadPoolExecutor;
++import java.util.concurrent.TimeUnit;
++import java.util.concurrent.atomic.AtomicInteger;
++import java.util.concurrent.locks.LockSupport;
++import java.util.function.BooleanSupplier;
++
++public class PublicConstantsAndHooks {
++    private static final AtomicInteger asyncWorkerThreadIdCounter = new AtomicInteger();
++    public static final CallbackExecutor asyncExecutor = new CallbackExecutor(
++            Runtime.getRuntime().availableProcessors(),
++            Runtime.getRuntime().availableProcessors(),
++            50,
++            TimeUnit.MILLISECONDS,
++            new LinkedBlockingQueue<>(),
++            task -> new AnotherTickThread(task,"MikuServer-Async-Worker # "+ asyncWorkerThreadIdCounter.getAndIncrement())
++    );
++
++    public static boolean parallelWorldEnabled = true;
++
++    private static final AtomicInteger worldExecutorThreadCounter = new AtomicInteger();
++    public static ThreadPoolExecutor worldExecutor;
++
++    private static final AtomicInteger taskCounter = new AtomicInteger();
++
++    public static void awaitWorldTasks(){
++        if (parallelWorldEnabled){
++            while (taskCounter.get() > 0){
++                LockSupport.parkNanos(1);
++            }
++        }
++    }
++
++    public static void callWorldTick(ServerLevel level, BooleanSupplier shouldKeepTicking){
++        if (!parallelWorldEnabled){
++            try {
++                level.tick(shouldKeepTicking);
++                for (final io.papermc.paper.chunk.SingleThreadChunkRegionManager regionManager : level.getChunkSource().chunkMap.regionManagers) {
++                    regionManager.recalculateRegions();
++                }
++            } catch (Throwable throwable) {
++                throwable.printStackTrace();
++            }
++            level.explosionDensityCache.clear();
++            return;
++        }
++
++        taskCounter.getAndIncrement();
++        worldExecutor.execute(()->{
++            try {
++                try {
++                    level.tick(shouldKeepTicking);
++                    for (final io.papermc.paper.chunk.SingleThreadChunkRegionManager regionManager : level.getChunkSource().chunkMap.regionManagers) {
++                        regionManager.recalculateRegions();
++                    }
++                } catch (Throwable throwable) {
++                    throwable.printStackTrace();
++                }
++                level.explosionDensityCache.clear();
++            }finally {
++                taskCounter.getAndDecrement();
++            }
++        });
++    }
++
++    public static void init(){
++        worldExecutor = new ThreadPoolExecutor(
++                MinecraftServer.getServer().levels.size(),
++                MinecraftServer.getServer().levels.size(),
++                Long.MAX_VALUE,
++                TimeUnit.HOURS,
++                new LinkedBlockingQueue<>(),
++                task -> new AnotherTickThread(task,"MikuServer-World-Pool # " + worldExecutorThreadCounter.getAndIncrement())
++        );
++    }
++
++    static {
++        Runtime.getRuntime().addShutdownHook(new Thread(()->{
++            if (asyncExecutor.isSubmittingStarted()){
++                asyncExecutor.stopSubmitting();
++            }
++            asyncExecutor.shutdownNow();
++        }));
++    }
++}
+diff --git a/src/main/java/net/minecraft/server/MinecraftServer.java b/src/main/java/net/minecraft/server/MinecraftServer.java
+index c47d03d7c0c1e38addd7d11a3889dc2b247be302..48118bf18283a7400c55ecbff857201d9690fe4b 100644
+--- a/src/main/java/net/minecraft/server/MinecraftServer.java
++++ b/src/main/java/net/minecraft/server/MinecraftServer.java
+@@ -1,6 +1,6 @@
+ package net.minecraft.server;
+ 
+-import co.mikumc.mikuserver.PublicConstants;
++import co.mikumc.mikuserver.PublicConstantsAndHooks;
+ import com.google.common.base.Splitter;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.Lists;
+@@ -219,7 +219,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     private String localIp;
+     private int port;
+     private final LayeredRegistryAccess<RegistryLayer> registries;
+-    private Map<ResourceKey<Level>, ServerLevel> levels;
++    public Map<ResourceKey<Level>, ServerLevel> levels;
+     private PlayerList playerList;
+     private volatile boolean running;
+     private volatile boolean isRestarting = false; // Paper - flag to signify we're attempting to restart
+@@ -1126,6 +1126,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             Arrays.fill( recentTps, 20 );
+             long start = System.nanoTime(), curTime, tickSection = start; // Paper - Further improve server tick loop
+             lastTick = start - TICK_TIME; // Paper
++            PublicConstantsAndHooks.init();
+             while (this.running) {
+                 // Paper start - rewrite chunk system
+                 // guarantee that nothing can stop the server from halting if it can at least still tick
+@@ -1388,8 +1389,8 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+     public void onServerExit() {}
+ 
+     public void tickServer(BooleanSupplier shouldKeepTicking) {
+-        if (PublicConstants.asyncExecutor.isSubmittingStarted()){
+-            PublicConstants.asyncExecutor.stopSubmitting();
++        if (PublicConstantsAndHooks.asyncExecutor.isSubmittingStarted()){
++            PublicConstantsAndHooks.asyncExecutor.stopSubmitting();
+         }
+         //co.aikar.timings.TimingsManager.FULL_SERVER_TICK.startTiming(); // Paper // Purpur
+         long i = Util.getNanos();
+@@ -1404,7 +1405,7 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+         new com.destroystokyo.paper.event.server.ServerTickStartEvent(this.tickCount+1).callEvent(); // Paper
+ 
+         ++this.tickCount;
+-        PublicConstants.asyncExecutor.startSubmitting();
++        PublicConstantsAndHooks.asyncExecutor.startSubmitting();
+         this.tickChildren(shouldKeepTicking);
+         if (i - this.lastServerStatus >= 5000000000L) {
+             this.lastServerStatus = i;
+@@ -1541,37 +1542,9 @@ public abstract class MinecraftServer extends ReentrantBlockableEventLoop<TickTa
+             // CraftBukkit end */
+ 
+             //this.profiler.push("tick"); // Purpur
+-
+-            try {
+-                //worldserver.timings.doTick.startTiming(); // Spigot // Purpur
+-                worldserver.tick(shouldKeepTicking);
+-                // Paper start
+-                for (final io.papermc.paper.chunk.SingleThreadChunkRegionManager regionManager : worldserver.getChunkSource().chunkMap.regionManagers) {
+-                    regionManager.recalculateRegions();
+-                }
+-                // Paper end
+-                //worldserver.timings.doTick.stopTiming(); // Spigot // Purpur
+-            } catch (Throwable throwable) {
+-                // Spigot Start
+-                CrashReport crashreport;
+-                try {
+-                    crashreport = CrashReport.forThrowable(throwable, "Exception ticking world");
+-                } catch (Throwable t) {
+-                    if (throwable instanceof ThreadDeath) {
+-                        throw (ThreadDeath) throwable;
+-                    } // Paper
+-                    throw new RuntimeException("Error generating crash report", t);
+-                }
+-                // Spigot End
+-
+-                worldserver.fillReportDetails(crashreport);
+-                throw new ReportedException(crashreport);
+-            }
+-
+-            //this.profiler.pop(); // Purpur
+-            //this.profiler.pop(); // Purpur
+-            worldserver.explosionDensityCache.clear(); // Paper - Optimize explosions
++            PublicConstantsAndHooks.callWorldTick(worldserver,shouldKeepTicking);
+         }
++        PublicConstantsAndHooks.awaitWorldTasks();
+         this.isIteratingOverLevels = false; // Paper
+ 
+         //this.profiler.popPush("connection"); // Purpur
+diff --git a/src/main/java/net/minecraft/world/entity/Entity.java b/src/main/java/net/minecraft/world/entity/Entity.java
+index 1ae7ef3d94d4d3d8413a5419eeb9fadad89d2f8d..e0ec9b8df6adea6b744c515b5a50ca2562cd792d 100644
+--- a/src/main/java/net/minecraft/world/entity/Entity.java
++++ b/src/main/java/net/minecraft/world/entity/Entity.java
+@@ -24,6 +24,8 @@ import java.util.function.BiConsumer;
+ import java.util.function.Predicate;
+ import java.util.stream.Stream;
+ import javax.annotation.Nullable;
++
++import it.unimi.dsi.fastutil.objects.Object2DoubleMaps;
+ import net.minecraft.BlockUtil;
+ import net.minecraft.CrashReport;
+ import net.minecraft.CrashReportCategory;
+@@ -580,8 +582,8 @@ public abstract class Entity implements Nameable, EntityAccess, CommandSource {
+         this.nextStep = 1.0F;
+         this.random = world == null || world.purpurConfig.entitySharedRandom ? SHARED_RANDOM : RandomSource.create(); // Paper // Purpur
+         this.remainingFireTicks = -this.getFireImmuneTicks();
+-        this.fluidHeight = new Object2DoubleArrayMap(2);
+-        this.fluidOnEyes = new HashSet();
++        this.fluidHeight = Object2DoubleMaps.synchronize(new Object2DoubleArrayMap(2));
++        this.fluidOnEyes = Sets.newConcurrentHashSet();
+         this.firstTick = true;
+         this.levelCallback = EntityInLevelCallback.NULL;
+         this.packetPositionCodec = new VecDeltaCodec();
+diff --git a/src/main/java/net/minecraft/world/entity/LivingEntity.java b/src/main/java/net/minecraft/world/entity/LivingEntity.java
+index 81e6da51ad6a1435496921e1241bc91f278dfde4..17540e30d769b977817b7f268634e59fa4820802 100644
+--- a/src/main/java/net/minecraft/world/entity/LivingEntity.java
++++ b/src/main/java/net/minecraft/world/entity/LivingEntity.java
+@@ -1,6 +1,6 @@
+ package net.minecraft.world.entity;
+ 
+-import co.mikumc.mikuserver.PublicConstants;
++import co.mikumc.mikuserver.PublicConstantsAndHooks;
+ import com.destroystokyo.paper.event.player.PlayerArmorChangeEvent; // Paper
+ import com.google.common.base.Objects;
+ import com.google.common.collect.ImmutableList;
+@@ -2014,6 +2014,10 @@ public abstract class LivingEntity extends Entity {
+             BlockPos blockposition = this.blockPosition();
+             BlockState iblockdata = this.getFeetBlockState();
+ 
++            if (iblockdata == null){
++                return false;
++            }
++
+             if (iblockdata.is(BlockTags.CLIMBABLE)) {
+                 this.lastClimbablePos = Optional.of(blockposition);
+                 return true;
+@@ -3098,7 +3102,7 @@ public abstract class LivingEntity extends Entity {
+             if(this instanceof net.minecraft.world.entity.player.Player){
+                 this.aiStep(); //Skip player
+             }else {
+-                PublicConstants.asyncExecutor.executeWithCallBack(this::aiStep,()->{});
++                PublicConstantsAndHooks.asyncExecutor.executeWithCallBack(this::aiStep,()->{});
+             }
+             //MikuServer end
+         }
+diff --git a/src/main/java/net/minecraft/world/entity/Mob.java b/src/main/java/net/minecraft/world/entity/Mob.java
+index 3e3e9b933f07f5fc6ed42bd2d8019f2323465541..68145c2410d33b21287af10021d08bd4060bdc9d 100644
+--- a/src/main/java/net/minecraft/world/entity/Mob.java
++++ b/src/main/java/net/minecraft/world/entity/Mob.java
+@@ -1,6 +1,6 @@
+ package net.minecraft.world.entity;
+ 
+-import co.mikumc.mikuserver.PublicConstants;
++import co.mikumc.mikuserver.PublicConstantsAndHooks;
+ import com.google.common.collect.Maps;
+ import java.util.Arrays;
+ import java.util.Iterator;
+@@ -219,7 +219,7 @@ public abstract class Mob extends LivingEntity {
+     public void inactiveTick() {
+         super.inactiveTick();
+         boolean isThrottled = gg.pufferfish.pufferfish.PufferfishConfig.throttleInactiveGoalSelectorTick && _pufferfish_inactiveTickDisableCounter++ % 20 != 0; // Pufferfish - throttle inactive goal selector ticking
+-        PublicConstants.asyncExecutor.executeWithCallBack(()->{
++        PublicConstantsAndHooks.asyncExecutor.executeWithCallBack(()->{
+             if (this.goalSelector.inactiveTick(this.activatedPriority, true) && !isThrottled) { // Pufferfish - pass activated priroity // Pufferfish - throttle inactive goal selector ticking
+                 this.goalSelector.tick();
+             }
+diff --git a/src/main/java/net/minecraft/world/entity/npc/Villager.java b/src/main/java/net/minecraft/world/entity/npc/Villager.java
+index 913bdb48c212b945f70c3176459a65fa836a9e9c..3d9516bba82e331e92834fb6ab34930b7c926bbe 100644
+--- a/src/main/java/net/minecraft/world/entity/npc/Villager.java
++++ b/src/main/java/net/minecraft/world/entity/npc/Villager.java
+@@ -1,6 +1,6 @@
+ package net.minecraft.world.entity.npc;
+ 
+-import co.mikumc.mikuserver.PublicConstants;
++import co.mikumc.mikuserver.PublicConstantsAndHooks;
+ import com.google.common.annotations.VisibleForTesting;
+ import com.google.common.collect.ImmutableList;
+ import com.google.common.collect.ImmutableMap;
+@@ -318,7 +318,7 @@ public class Villager extends AbstractVillager implements ReputationEventHandler
+         if (this.getUnhappyCounter() > 0) {
+             this.setUnhappyCounter(this.getUnhappyCounter() - 1);
+         }
+-        PublicConstants.asyncExecutor.executeWithCallBack(()->{
++        PublicConstantsAndHooks.asyncExecutor.executeWithCallBack(()->{
+             if (this.isEffectiveAi()) {
+                 if (level.spigotConfig.tickInactiveVillagers) {
+                     this.customServerAiStep();
